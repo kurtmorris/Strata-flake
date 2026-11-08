@@ -1,4 +1,5 @@
-# The Strata engine (the C++/CUDA `strata` binary) for NVIDIA GPUs.
+# The Strata engine (the C++/CUDA `strata` binary) for NVIDIA GPUs, or with `dsv41`
+# the separate DeepSeek-V4.1 engine (`strata-dsv41`).
 {
   lib,
   cudaPackages,
@@ -11,13 +12,15 @@
   buildId,
   # CUDA compute capabilities to compile for, e.g. [ "8.9" "12.0" ].
   cudaCapabilities ? (import ../lib/gpus.nix { inherit lib; }).default,
+  dsv41 ? false,
 }:
 
 let
   gpus = import ../lib/gpus.nix { inherit lib; };
+  exe = if dsv41 then "strata-dsv41" else "strata";
 in
 cudaPackages.backendStdenv.mkDerivation {
-  pname = "strata-engine";
+  pname = if dsv41 then "strata-dsv41" else "strata-engine";
   inherit version;
   src = strataSrc;
 
@@ -52,13 +55,14 @@ cudaPackages.backendStdenv.mkDerivation {
     (lib.cmakeBool "FETCHCONTENT_FULLY_DISCONNECTED" true)
     (lib.cmakeFeature "STRATA_BUILD_ID" buildId)
     (lib.cmakeFeature "CMAKE_CUDA_ARCHITECTURES" (gpus.toCmakeArchitectures cudaCapabilities))
-  ];
+  ]
+  ++ lib.optional dsv41 (lib.cmakeBool "STRATA_BUILD_DSV41" true);
 
-  ninjaFlags = [ "strata" ];
+  ninjaFlags = [ exe ];
 
   installPhase = ''
     runHook preInstall
-    install -Dm755 strata $out/bin/strata
+    install -Dm755 ${exe} $out/bin/${exe}
     runHook postInstall
   '';
 
@@ -69,6 +73,6 @@ cudaPackages.backendStdenv.mkDerivation {
     homepage = "https://github.com/niko1221/strata";
     license = lib.licenses.mit;
     platforms = [ "x86_64-linux" ];
-    mainProgram = "strata";
+    mainProgram = exe;
   };
 }

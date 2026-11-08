@@ -50,22 +50,35 @@
         pkgs:
         {
           cudaCapabilities ? null,
+          # PyTorch for preparing NVIDIA's FP4 checkpoint (the NVFP4-QAD model) on this machine.
+          withNvfp4Local ? false,
         }:
+        let
+          engine =
+            args:
+            pkgs.callPackage ./pkgs/strata-engine.nix (
+              {
+                cudaPackages = pkgs.cudaPackages_13_0;
+                inherit strataSrc llamaCppSrc;
+                buildId = builtins.substring 0 9 strataSrc.rev;
+                version = engineVersion;
+              }
+              // lib.optionalAttrs (cudaCapabilities != null) { inherit cudaCapabilities; }
+              // args
+            );
+        in
         rec {
-          strata-engine = pkgs.callPackage ./pkgs/strata-engine.nix (
-            {
-              cudaPackages = pkgs.cudaPackages_13_0;
-              inherit strataSrc;
-              inherit llamaCppSrc;
-              buildId = builtins.substring 0 9 strataSrc.rev;
-              version = engineVersion;
-            }
-            // lib.optionalAttrs (cudaCapabilities != null) { inherit cudaCapabilities; }
-          );
+          strata-engine = engine { };
+          # The DeepSeek-V4.1 engine, a separate program.
+          strata-dsv41 = engine { dsv41 = true; };
           strata = pkgs.callPackage ./pkgs/strata.nix {
-            inherit strataSrc;
-            inherit llamaCppSrc;
-            inherit version strata-engine;
+            inherit
+              strataSrc
+              llamaCppSrc
+              version
+              strata-engine
+              withNvfp4Local
+              ;
           };
         };
 

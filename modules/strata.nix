@@ -6,6 +6,9 @@
 # Models from upstream's catalogue (../models.json, generated from setup.py) are
 # downloaded at run time by strata-model.service, not into the Nix store: they are
 # tens of gigabytes, and garbage collection would delete them on every model change.
+# A "native" model (a single GGUF) is downloaded and prepared here; any other is
+# prepared by upstream's setup.py, which also picks its engine arguments for this
+# machine's RAM and VRAM.
 { mkPackages }:
 
 {
@@ -35,27 +38,41 @@ let
     else
       gpus.default;
 
+  packages = mkPackages pkgs {
+    cudaCapabilities = capabilities;
+    withNvfp4Local = model != null && model.nvfp4Local or false;
+  };
+
   model = if cfg.model != null then catalogue.${cfg.model} else null;
+  native = model != null && model.kind == "native";
+  viaSetup = model != null && model.kind == "setup";
+
   gguf = "${cfg.modelsDir}/${model.file}";
   pack = "${stateDir}/packs/${model.modelName}";
+  # Where setup.py installs to, and the run config it writes there.
+  installDir = "${stateDir}/install";
+  setupConfig = "${stateDir}/setup-run.json";
 
-  serverConfig = json.generate "strata.json" (
-    {
-      exe = lib.getExe cfg.package.strata-engine;
-      args = cfg.engineArgs ++ cfg.extraEngineArgs;
-      cwd = stateDir;
-      tokenizer = cfg.tokenizer;
-      model_name = cfg.modelName;
-      lib_dirs = [ "/run/opengl-driver/lib" ];
-      inherit (cfg) host;
-    }
-    // lib.optionalAttrs (model != null) { inherit (model) arch; }
-    // cfg.settings
-  );
+  # The run config before the machine-dependent parts: from the options, or from setup.py.
+  baseConfig =
+    if viaSetup then
+      setupConfig
+    else
+      json.generate "strata-base.json" (
+        {
+          exe = lib.getExe cfg.package.strata-engine;
+          args = cfg.engineArgs;
+          cwd = stateDir;
+          tokenizer = cfg.tokenizer;
+          model_name = cfg.modelName;
+        }
+        // lib.optionalAttrs native { inherit (model) arch; }
+      );
+  overlay = json.generate "strata-overlay.json" ({ inherit (cfg) host; } // cfg.settings);
 
-  # Downloads the model file (resuming a partial one), checks its size and SHA-256 once,
-  # and extracts its tokenizer. Every step is skipped when already done.
-  prepareModel = pkgs.writeShellApplication {
+  # A native model: downloads the file (resuming a partial one), checks its size and
+  # SHA-256 once, and extracts its tokenizer. Every step is skipped when already done.
+  prepareNative = pkgs.writeShellApplication {
     name = "strata-prepare-model";
     runtimeInputs = with pkgs; [
       coreutils
@@ -94,6 +111,67 @@ let
       fi
     '';
   };
+
+  # Any other model: upstream's setup.py, in the mode Strata's desktop app runs it in
+  # (STRATA_CONTROL_INSTALL): it downloads and prepares the model and writes a run config,
+  # but installs no Python package and fetches or compiles no engine. It runs again only
+  # when the model, its settings or Strata change, since checking hundreds of gigabytes
+  # takes a while.
+  setupCmd = [
+    "${cfg.package.python}/bin/python3"
+    "-B"
+    "setup.py"
+    "--family"
+    model.family
+    "--model"
+    model.model
+    "--yes"
+    "--no-start"
+    "--no-browser"
+    "--vision"
+    "no"
+    "--data-dir"
+    "${stateDir}/data"
+    "--models-dir"
+    cfg.modelsDir
+  ]
+  ++ lib.optionals (cfg.context != null) [
+    "--context"
+    (toString cfg.context)
+  ]
+  ++ cfg.setupArgs;
+
+  prepareSetup = pkgs.writeShellApplication {
+    name = "strata-prepare-model";
+    runtimeInputs = with pkgs; [
+      coreutils
+      jq
+    ];
+    text = ''
+      install=${installDir}
+      run_config="$install/${model.configName}"
+      stamp="$install/.prepared"
+      want=${lib.escapeShellArg (builtins.toJSON setupCmd)}
+
+      if [ ! -f "$run_config" ] || [ "$(cat "$stamp" 2>/dev/null)" != "$want" ]; then
+        # llama.cpp's gguf-py for the preparation tools, from the commit Strata pins.
+        mkdir -p "$install/third_party"
+        ln -sfn ${cfg.package.llamaCppSrc} "$install/third_party/llama.cpp"
+        export STRATA_CONTROL_INSTALL=1 STRATA_INSTALL_DIR="$install"
+        ${lib.optionalString (model.engine == "dsv41") ''
+          export STRATA_DSV41_EXE=${lib.getExe cfg.dsv41Package}
+        ''}
+        cd ${cfg.package}/share/strata
+        ${lib.escapeShellArgs setupCmd}
+        echo "$want" > "$stamp"
+      fi
+
+      # The app's engine component is this flake's engine.
+      jq --arg exe ${lib.getExe cfg.package.strata-engine} \
+        'if (.exe | startswith("component:")) then .exe = $exe else . end' \
+        "$run_config" > ${setupConfig}
+    '';
+  };
 in
 {
   options.services.strata = {
@@ -120,9 +198,16 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = (mkPackages pkgs { cudaCapabilities = capabilities; }).strata;
+      default = packages.strata;
       defaultText = lib.literalMD "Strata built for {option}`services.strata.gpus`";
       description = "The Strata package (server and terminal, with its engine as `passthru.strata-engine`).";
+    };
+
+    dsv41Package = lib.mkOption {
+      type = lib.types.package;
+      default = packages.strata-dsv41;
+      defaultText = lib.literalMD "the DeepSeek-V4.1 engine built for {option}`services.strata.gpus`";
+      description = "The DeepSeek-V4.1 engine, built only when a DeepSeek model is chosen.";
     };
 
     model = lib.mkOption {
@@ -130,28 +215,40 @@ in
       default = null;
       example = "qwen3.6-35b-a3b:UD-Q4_K_XL";
       description = ''
-        A model from Strata's catalogue, downloaded to {option}`services.strata.modelsDir`
-        on first start and checked against its pinned SHA-256. It sets the engine arguments,
-        tokenizer and model name; leave it unset to give those yourself. Choices:
+        A model from Strata's catalogue, downloaded to {option}`services.strata.modelsDir` and
+        prepared on first start; it sets everything the engine needs. Leave it unset to give
+        {option}`services.strata.engineArgs` and the rest yourself. Choices:
 
         ${lib.concatStrings (
           lib.mapAttrsToList (
-            name: m:
-            "- `${name}`: ${m.about}; ${
-              toString ((m.size + 500000000) / 1000000000)
-            } GB download, about ${toString m.ramGb} GB of RAM\n"
+            name: m: "- `${name}`: ${m.about}; about ${toString m.ramGb} GB of RAM\n"
           ) catalogue
         )}
       '';
     };
 
     context = lib.mkOption {
-      type = lib.types.ints.positive;
-      default = if model != null then model.context else 131072;
-      defaultText = lib.literalMD "upstream's recommendation for the model (131072)";
+      type = lib.types.nullOr lib.types.ints.positive;
+      default = null;
       description = ''
-        Context length in tokens, for {option}`services.strata.model`. Its cache takes VRAM
-        the experts would otherwise use; lower it to fit more experts on a small card.
+        Context length in tokens. Its cache takes VRAM the experts would otherwise use; lower
+        it to fit more experts on a small card. `null` uses upstream's recommendation for the
+        model and this machine.
+      '';
+    };
+
+    setupArgs = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [
+        "--low-ram"
+        "resident"
+        "--kv"
+        "q4_0"
+      ];
+      description = ''
+        Extra options for upstream's `setup.py` (`setup.py --help` lists them), for models it
+        prepares: every model but Qwen3.6. Changing them prepares the model again.
       '';
     };
 
@@ -160,7 +257,7 @@ in
       default = "auto";
       description = ''
         Threads computing experts on the CPU (`--pool-workers`). `"auto"` uses upstream's
-        recommendation, which only applies to CPUs with performance and efficiency cores;
+        recommendation, which only applies to CPUs with more efficiency than performance cores;
         `null` leaves it to the engine.
       '';
     };
@@ -170,8 +267,8 @@ in
       default = "${stateDir}/models";
       defaultText = lib.literalExpression ''"/var/lib/strata/models"'';
       description = ''
-        Where model files are downloaded. It needs room for the model (23 to 38 GB). A folder
-        outside `/var/lib/strata` must be writable by the `strata` user.
+        Where model files are downloaded: 23 GB for the smallest model, several hundred for the
+        largest. A folder outside `/var/lib/strata` must be writable by the `strata` user.
       '';
     };
 
@@ -202,15 +299,15 @@ in
     modelName = lib.mkOption {
       type = lib.types.str;
       example = "qwen3.6-35b-a3b";
-      description = "Model name reported by the API. Set by {option}`services.strata.model`.";
+      description = "Model name reported by the API, without {option}`services.strata.model`.";
     };
 
     tokenizer = lib.mkOption {
       type = lib.types.str;
       example = "/var/lib/strata/packs/my-model/tokenizer";
       description = ''
-        The model's tokenizer folder (`strata-tokenizer --gguf FILE --out DIR` makes one in
-        `DIR/tokenizer`). Set by {option}`services.strata.model`.
+        The model's tokenizer folder, without {option}`services.strata.model`
+        (`strata-tokenizer --gguf FILE --out DIR` makes one in `DIR/tokenizer`).
       '';
     };
 
@@ -226,7 +323,7 @@ in
         "--mtp"
         "2"
       ];
-      description = "Arguments for the engine: the model files and how to run them. Set by {option}`services.strata.model`.";
+      description = "Arguments for the engine: the model files and how to run them, without {option}`services.strata.model`.";
     };
 
     extraEngineArgs = lib.mkOption {
@@ -262,7 +359,7 @@ in
 
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
-      (lib.mkIf (model != null) {
+      (lib.mkIf native {
         services.strata = {
           modelName = lib.mkDefault model.modelName;
           tokenizer = lib.mkDefault "${pack}/tokenizer";
@@ -270,26 +367,34 @@ in
             "--native"
             gguf
             "--max-context"
-            (toString cfg.context)
+            (toString (if cfg.context != null then cfg.context else model.context))
             "--prefill"
             "auto"
             "--mtp"
             (toString model.mtp)
           ];
         };
+      })
 
+      (lib.mkIf (model != null) {
         systemd.services.strata-model = {
           description = "Download and prepare Strata's model";
           wants = [ "network-online.target" ];
           after = [ "network-online.target" ];
+          environment = {
+            STRATA_UPDATE_CHECK = "0";
+            HOME = stateDir;
+          };
+          # setup.py reads the GPUs from nvidia-smi.
+          path = lib.optional viaSetup config.hardware.nvidia.package.bin;
           serviceConfig = {
             Type = "oneshot";
             RemainAfterExit = true;
-            ExecStart = lib.getExe prepareModel;
+            ExecStart = lib.getExe (if native then prepareNative else prepareSetup);
             User = "strata";
             Group = "strata";
             StateDirectory = "strata";
-            # A first download is large.
+            # A first download is large, and preparing NVIDIA's FP4 checkpoint takes up to 40 minutes.
             TimeoutStartSec = "infinity";
           };
         };
@@ -311,6 +416,9 @@ in
           ++ lib.optional (cfg.host != "127.0.0.1" && cfg.host != "::1" && cfg.apiKeyFile == null) ''
             services.strata listens on ${cfg.host} without services.strata.apiKeyFile: anyone who can
             reach port ${toString cfg.port} can use the model.
+          ''
+          ++ lib.optional (cfg.setupArgs != [ ] && !viaSetup) ''
+            services.strata.setupArgs only applies to models prepared by setup.py (every model but Qwen3.6).
           '';
 
         users.users.strata = {
@@ -340,7 +448,8 @@ in
 
           path = [ pkgs.jq ];
 
-          # The CPU worker count depends on the machine, so it is added to the run config here.
+          # The run config: the base one, the options over it, and the CPU worker count,
+          # which depends on the machine.
           script = ''
             ${lib.optionalString (cfg.apiKeyFile != null) ''
               STRATA_API_KEY="$(< "$CREDENTIALS_DIRECTORY/api-key")"
@@ -355,9 +464,13 @@ in
                 toString cfg.cpuWorkers
             }
             config="$RUNTIME_DIRECTORY/strata.json"
-            jq --arg w "$workers" \
-              'if $w != "" and (.args | index("--pool-workers") | not) then .args += ["--pool-workers", $w] else . end' \
-              ${serverConfig} > "$config"
+            jq --slurpfile overlay ${overlay} --arg w "$workers" \
+              --argjson extra ${lib.escapeShellArg (builtins.toJSON cfg.extraEngineArgs)} '
+                (. * $overlay[0])
+                | .args += $extra
+                | .lib_dirs = ((.lib_dirs // []) + ["/run/opengl-driver/lib"] | unique)
+                | if $w != "" and (.args | index("--pool-workers") | not) then .args += ["--pool-workers", $w] else . end
+              ' ${baseConfig} > "$config"
 
             exec ${lib.getExe cfg.package} --engine strata --config "$config" --port ${toString cfg.port} \
               ${lib.escapeShellArgs (

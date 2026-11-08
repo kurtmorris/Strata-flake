@@ -9,11 +9,14 @@
   version,
   strata-engine,
   llamaCppSrc,
+  withNvfp4Local ? false,
 }:
 
 let
   python = python3.withPackages (
-    ps: with ps; [
+    ps:
+    with ps;
+    [
       numpy
       jinja2
       regex
@@ -23,6 +26,11 @@ let
       pillow
       psutil
       truststore
+    ]
+    ++ lib.optionals withNvfp4Local [
+      torch
+      transformers
+      safetensors
     ]
   );
 in
@@ -64,7 +72,7 @@ stdenvNoCC.mkDerivation {
     runHook postInstall
   '';
 
-  passthru = { inherit python strata-engine; };
+  passthru = { inherit python strata-engine llamaCppSrc; };
 
   meta = strata-engine.meta // {
     description = "Strata server and terminal for MoE models too large for VRAM";
