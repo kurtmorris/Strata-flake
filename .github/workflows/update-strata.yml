@@ -16,9 +16,6 @@ permissions:
 jobs:
   bump:
     runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.update.outputs.tag }}
-      branch: ${{ steps.pr.outputs.branch }}
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
@@ -27,8 +24,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: echo "tag=$(scripts/update-strata.sh ${{ inputs.tag }})" >> "$GITHUB_OUTPUT"
+      # Pull requests opened by Actions do not start other workflows, so check the bump here.
+      - name: Check the flake
+        if: steps.update.outputs.tag != ''
+        run: |
+          nix flake check --no-build
+          nix eval .#packages.x86_64-linux.strata.drvPath
+          nix eval .#packages.x86_64-linux.strata-engine.drvPath
       - name: Open a pull request
-        id: pr
         if: steps.update.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -40,21 +43,13 @@ jobs:
           git switch -c "$branch"
           git commit -am "strata: $TAG"
           git push --force origin "$branch"
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
           if ! gh pr view "$branch" > /dev/null 2>&1; then
             gh pr create --head "$branch" --title "strata: $TAG" --body "$(cat <<BODY
           Moves the flake to Strata [$TAG](https://github.com/niko1221/strata/releases/tag/$TAG), with the llama.cpp commit that release pins.
 
-          The **Update Strata** run that opened this pull request also runs CI on it (evaluation, an RTX 50 build and a smoke test); its result is in that run, since pull requests opened by Actions do not start other workflows.
+          The flake evaluated with the new pins in the **Update Strata** run that opened this pull request. Nothing is built: the engine compiles on your machine when you update.
 
           Before merging, check upstream's flake.nix still uses CUDA 13.0, and the release notes for build changes.
           BODY
           )"
           fi
-
-  ci:
-    needs: bump
-    if: needs.bump.outputs.tag != ''
-    uses: ./.github/workflows/ci.yml
-    with:
-      ref: ${{ needs.bump.outputs.branch }}

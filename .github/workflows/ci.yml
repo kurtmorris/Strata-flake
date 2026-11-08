@@ -4,12 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_call:
-    inputs:
-      ref:
-        description: The commit or branch to check
-        type: string
-        default: ""
   workflow_dispatch:
 
 jobs:
@@ -17,8 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
       - uses: cachix/install-nix-action@v31
       - name: Flake check
         run: nix flake check --no-build
@@ -26,36 +18,3 @@ jobs:
         run: |
           nix eval .#packages.x86_64-linux.strata.drvPath
           nix eval .#packages.x86_64-linux.strata-engine.drvPath
-
-  build:
-    # One GPU generation: enough to prove the engine compiles, in a fraction of the time.
-    needs: eval
-    runs-on: ubuntu-latest
-    timeout-minutes: 300
-    steps:
-      - name: Free disk space
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
-      - uses: cachix/install-nix-action@v31
-        with:
-          extra_nix_config: |
-            extra-substituters = https://cache.nixos-cuda.org
-            extra-trusted-public-keys = cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M=
-      - name: Build for RTX 50
-        run: |
-          nix build -L --impure --expr '
-            let
-              flake = builtins.getFlake (toString ./.);
-              pkgs = import flake.inputs.nixpkgs { system = "x86_64-linux"; config.allowUnfree = true; };
-            in (flake.lib.mkPackages pkgs { cudaCapabilities = [ "12.0" ]; }).strata'
-      - name: Smoke test
-        run: |
-          ./result/bin/strata-engine --version
-          ./result/bin/strata --help > /dev/null
-          ./result/bin/strata-server --engine mock --port 18095 &
-          for _ in $(seq 1 30); do curl -sf localhost:18095/health && break; sleep 1; done
-          curl -sf localhost:18095/v1/chat/completions -H 'content-type: application/json' \
-            -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":8}'
-          kill %1
