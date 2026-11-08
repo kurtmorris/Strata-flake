@@ -1,0 +1,60 @@
+name: Update Strata
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to move to (default the latest)
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.update.outputs.tag }}
+      branch: ${{ steps.pr.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Move to the latest release
+        id: update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "tag=$(scripts/update-strata.sh ${{ inputs.tag }})" >> "$GITHUB_OUTPUT"
+      - name: Open a pull request
+        id: pr
+        if: steps.update.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.update.outputs.tag }}
+        run: |
+          branch="update/strata-$TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "strata: $TAG"
+          git push --force origin "$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          if ! gh pr view "$branch" > /dev/null 2>&1; then
+            gh pr create --head "$branch" --title "strata: $TAG" --body "$(cat <<BODY
+          Moves the flake to Strata [$TAG](https://github.com/niko1221/strata/releases/tag/$TAG), with the llama.cpp commit that release pins.
+
+          The **Update Strata** run that opened this pull request also runs CI on it (evaluation, an RTX 50 build and a smoke test); its result is in that run, since pull requests opened by Actions do not start other workflows.
+
+          Before merging, check upstream's flake.nix still uses CUDA 13.0, and the release notes for build changes.
+          BODY
+          )"
+          fi
+
+  ci:
+    needs: bump
+    if: needs.bump.outputs.tag != ''
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.bump.outputs.branch }}

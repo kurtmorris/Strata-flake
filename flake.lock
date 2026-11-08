@@ -52,8 +52,8 @@
       },
       "original": {
         "owner": "niko1221",
+        "ref": "v0.2.12",
         "repo": "strata",
-        "rev": "146df3c468739147f520ac3816de806f71232571",
         "type": "github"
       }
     }

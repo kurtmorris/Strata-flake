@@ -82,7 +82,8 @@ The packages are built for every generation. For a smaller build, use the flake'
 - The engine is built from source with CUDA 13.0 (upstream's choice; 13.2 miscompiles for RTX 50).
 - ggml's CPU code is built for an AVX2 baseline rather than `-march=native`, as upstream's ready-made
   engine is; Strata's own AVX-512 kernels are still chosen at run time.
-- The update check and engine downloads are off; update by bumping this flake.
+- The update check and engine downloads are off; update by updating this flake. A daily workflow
+  opens a pull request for each new Strata release (`scripts/update-strata.sh` does the same by hand).
 - The model files and the server's settings are declared in the module, not set up by `setup.py`.
 
 ## License
