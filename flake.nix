@@ -64,6 +64,7 @@
           );
           strata = pkgs.callPackage ./pkgs/strata.nix {
             inherit strataSrc;
+            inherit llamaCppSrc;
             inherit version strata-engine;
           };
         };

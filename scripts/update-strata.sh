@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Move the flake to Strata's latest release: the strata input, `version`, and the
-# llama-cpp input (the commit that release's CMakeLists.txt pins).
+# Move the flake to Strata's latest release: the strata input, `version`, the
+# llama-cpp input (the commit that release's CMakeLists.txt pins) and models.json.
 #
 # Usage: scripts/update-strata.sh [TAG]   (default: the latest release)
 # Prints the new tag, or nothing when the flake is already on it. Needs curl, jq, nix.
@@ -29,5 +29,9 @@ sed -i -E \
   -e "s|^(      version = \")[^\"]+\";|\1${tag#v}\";|" \
   flake.nix
 nix flake update strata llama-cpp >&2
+
+# The model catalogue (files, sizes, SHA-256s) from the new release's setup.py.
+src=$(nix flake archive --json | jq -r .inputs.strata.path)
+nix shell nixpkgs#python3 -c python3 scripts/gen-models.py "$src" > models.json
 
 echo "$tag"

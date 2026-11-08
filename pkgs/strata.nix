@@ -8,6 +8,7 @@
   strataSrc,
   version,
   strata-engine,
+  llamaCppSrc,
 }:
 
 let
@@ -50,6 +51,16 @@ stdenvNoCC.mkDerivation {
       --set STRATA_UPDATE_CHECK 0 \
       --prefix LD_LIBRARY_PATH : /run/opengl-driver/lib
     ln -s ${strata-engine}/bin/strata $out/bin/strata-engine
+
+    # Extracts a GGUF's tokenizer into a pack folder, with gguf-py from the llama.cpp commit Strata pins.
+    makeWrapper ${python}/bin/python3 $out/bin/strata-tokenizer \
+      --add-flags $out/share/strata/tools/strata_tokenizer.py \
+      --set STRATA_GGUF_PY ${llamaCppSrc}/gguf-py
+
+    # Upstream setup's CPU expert worker count for hybrid (P + E core) CPUs; prints nothing for others.
+    makeWrapper ${python}/bin/python3 $out/bin/strata-pool-workers \
+      --chdir $out/share/strata \
+      --add-flags "-B -c 'import setup as s; n = s.hybrid_pool_workers(s.cpu_cores()); print(min(n, s.POOL_WORKERS_CAP) if n else \"\")'"
     runHook postInstall
   '';
 

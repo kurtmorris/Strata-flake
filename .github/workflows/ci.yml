@@ -18,3 +18,7 @@ jobs:
         run: |
           nix eval .#packages.x86_64-linux.strata.drvPath
           nix eval .#packages.x86_64-linux.strata-engine.drvPath
+      - name: models.json matches the pinned setup.py
+        run: |
+          src=$(nix flake archive --json | jq -r .inputs.strata.path)
+          nix shell nixpkgs#python3 -c python3 scripts/gen-models.py "$src" | diff -u models.json -

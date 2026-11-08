@@ -26,14 +26,7 @@ Status: x86_64-linux with NVIDIA GPUs (CUDA). AMD (ROCm) and aarch64 (DGX Spark)
           services.strata = {
             enable = true;
             gpus = [ "rtx-40" ];
-            modelName = "qwen3.6-35b-a3b";
-            tokenizer = "/var/lib/strata/pack/tokenizer";
-            engineArgs = [
-              "--native" "/srv/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
-              "--max-context" "65536"
-              "--prefill" "auto"
-              "--mtp" "2"
-            ];
+            model = "qwen3.6-35b-a3b:UD-Q4_K_XL";
           };
         }
       ];
@@ -43,6 +36,25 @@ Status: x86_64-linux with NVIDIA GPUs (CUDA). AMD (ROCm) and aarch64 (DGX Spark)
 ```
 
 The server is an OpenAI-compatible API (and a chat page) on `http://127.0.0.1:8080`.
+
+### Choosing a model
+
+`model` names a model from Strata's catalogue. On first start, `strata-model.service` downloads it to
+`/var/lib/strata/models` (`modelsDir` changes that), checks it against the SHA-256 Strata pins, and
+extracts its tokenizer; later starts skip all of that. Models are kept out of the Nix store on purpose:
+they are tens of gigabytes, and garbage collection would delete them whenever you change models.
+
+| `model` | Download | RAM |
+|---|---|---|
+| `qwen3.6-35b-a3b:UD-Q4_K_XL` | 23 GB | 32 GB |
+| `qwen3.6-35b-a3b:UD-Q6_K_XL` | 33 GB | 44 GB |
+| `qwen3.6-35b-a3b:Q8_0` | 38 GB | 52 GB |
+
+The RAM figures are upstream's: the experts that don't fit in VRAM are kept in RAM. `context`
+(default 131072 tokens) trades context length for VRAM the experts could use.
+
+For a model outside the catalogue, leave `model` unset and give `modelName`, `tokenizer` and
+`engineArgs` yourself (`strata-tokenizer --gguf FILE --out DIR` makes the tokenizer).
 
 ### Choosing your GPU
 
@@ -84,7 +96,8 @@ The packages are built for every generation. For a smaller build, use the flake'
   engine is; Strata's own AVX-512 kernels are still chosen at run time.
 - The update check and engine downloads are off; update by updating this flake. A daily workflow
   opens a pull request for each new Strata release (`scripts/update-strata.sh` does the same by hand).
-- The model files and the server's settings are declared in the module, not set up by `setup.py`.
+- Models are downloaded by the module from the same pinned list `setup.py` uses, and the server is
+  configured by the module instead of `setup.py`. Picture input (the vision encoder) is not packaged yet.
 
 ## License
 
